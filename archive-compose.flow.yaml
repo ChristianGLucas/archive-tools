@@ -1,0 +1,22 @@
+# Axiom flow — composes published nodes into a graph.
+# Reference nodes by package + node name (discover them with: axiom search --json).
+# Positions are coarse grid cells; omit col/row to auto-layout (axiom flow layout).
+name: archive-compose
+description: ""
+
+nodes:
+  - alias: first                                   # local handle used in edges
+    package: axiom-official/your-package@1.0.0
+    node: YourFirstNode
+  - alias: second
+    package: axiom-official/your-package@1.0.0
+    node: YourSecondNode
+
+edges:
+  - from: first
+    to: second
+    # adapter:                 # optional: map destination fields <- source expressions
+    #   dest_field: input.source_field
+    # loop: true               # optional: mark a back-edge (excluded from layout depth)
+
+# start: first                 # optional — inferred when one node has no incoming edge

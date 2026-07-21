@@ -125,7 +125,7 @@ message ArchiveSummary {
   int64 total_compressed_size = 5;
   bool has_dirs = 6;
   bool has_symlinks = 7;
-  // True when this package's entry-count cap (100,000) was hit while
+  // True when this package's entry-count cap (5,000) was hit while
   // scanning headers — the summary reflects only what was scanned before
   // the cap stopped further reading, not the true archive totals. Neither
   // ListEntries nor GetArchiveSummary reads entry DATA (only headers), so
@@ -138,7 +138,7 @@ message ArchiveSummary {
 message EntryList {
   repeated ArchiveEntry entries = 1;
   int32 count = 2;
-  // True when the entry-count cap (100,000) was hit — `entries`/`count`
+  // True when the entry-count cap (5,000) was hit — `entries`/`count`
   // reflect only the entries scanned before the cap stopped further
   // reading. ListEntries never reads entry DATA (only headers), so only
   // the entry-count cap — never the decompressed-size cap — can trigger

@@ -35,8 +35,8 @@ nodes:
         size (zip only), symlink target, and whether its path is safe
         (not absolute, no ".." traversal). Metadata only — no entry bytes
         are returned; use ReadEntry or ExtractAll for that. Bounded by an
-        entry-count cap (100,000) and a total-uncompressed-bytes cap
-        (512 MiB) to guard against zip/decompression bombs; `truncated`
+        entry-count cap (5,000) and a total-uncompressed-bytes cap
+        (3 MiB) to guard against zip/decompression bombs; `truncated`
         is set true if a cap was hit.
     - name: GetArchiveSummary
       input: ArchiveInput
@@ -70,8 +70,8 @@ nodes:
         ListEntries for those). Any entry with an unsafe path (absolute or
         containing "..") is excluded from `entries` and its path is
         reported in `skipped_unsafe_paths` instead of being silently
-        dropped or honored. Bounded by the same entry-count (100,000) and
-        total-uncompressed-bytes (512 MiB) caps as ListEntries;
+        dropped or honored. Bounded by the same entry-count (5,000) and
+        total-uncompressed-bytes (3 MiB) caps as ListEntries;
         `truncated` is set true if a cap was hit.
     - name: CreateTar
       input: CreateArchiveRequest
@@ -137,7 +137,7 @@ nodes:
       output: CompressionResult
       description: >-
         Decompress a standalone compressed stream: "gzip", "zlib", "xz",
-        "zstd", or "bzip2". Bounded by a total-output-bytes cap (512 MiB)
+        "zstd", or "bzip2". Bounded by a total-output-bytes cap (3 MiB)
         to guard against decompression bombs — `truncated` is set true and
         the error field describes the cap if it is hit before the stream
         ends. Returns a structured error for an unrecognized codec or

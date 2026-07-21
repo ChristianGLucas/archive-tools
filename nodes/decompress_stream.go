@@ -10,7 +10,7 @@ import (
 
 // DecompressStream decompresses a standalone compressed stream: "gzip",
 // "zlib", "xz", "zstd", or "bzip2". Bounded by a total-output-bytes cap
-// (512 MiB) to guard against decompression bombs — a partial result is
+// (3 MiB) to guard against decompression bombs — a partial result is
 // returned with truncated=true if the cap is hit before the stream ends,
 // rather than erroring outright (a partial decompressed blob is still a
 // safe, useful, well-formed result — see helper.go's package doc comment

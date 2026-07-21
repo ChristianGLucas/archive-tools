@@ -1,7 +1,10 @@
 package nodes
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
 	"testing"
 
 	gen "christiangeorgelucas/archive-tools/gen"
@@ -75,6 +78,47 @@ func TestListEntries_UnsafePathFlagged(t *testing.T) {
 	}
 	if len(out.Entries) != 1 || out.Entries[0].PathSafe {
 		t.Fatalf("expected one entry flagged path_safe=false, got %+v", out.Entries)
+	}
+}
+
+// TestListEntries_RootDotEntryIsSafe is a regression test: sanitizePath
+// used to flag a tar's own "./" root-directory entry (produced by the
+// extremely common `tar -C dir .` idiom) as unsafe, which put it in
+// skipped_unsafe_paths / path_safe=false right alongside genuine zip-slip
+// attempts on every ordinary archive built that way — a false positive on
+// the package's own headline security signal.
+func TestListEntries_RootDotEntryIsSafe(t *testing.T) {
+	requireTool(t, "tar")
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/f.txt", []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	cmd := exec.Command("tar", "-czf", "-", "-C", dir, ".")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("system tar -C dir . failed: %v", err)
+	}
+	gz := out.Bytes()
+
+	result, err := ListEntries(testCtxBG, testAx, &gen.ArchiveInput{Data: gz})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, e := range result.Entries {
+		if (e.Path == "./" || e.Path == ".") && !e.PathSafe {
+			t.Fatalf("root entry %q incorrectly flagged unsafe", e.Path)
+		}
+	}
+
+	extracted, err := ExtractAll(testCtxBG, testAx, &gen.ArchiveInput{Data: gz})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range extracted.SkippedUnsafePaths {
+		if p == "./" || p == "." {
+			t.Fatalf("root entry %q incorrectly reported as skipped-unsafe", p)
+		}
 	}
 }
 

@@ -63,11 +63,17 @@ const (
 	// will even attempt to parse, before any decompression or central-
 	// directory parsing is attempted (a zip's central directory alone can
 	// be expensive to parse if the file is enormous).
-	maxRawInputBytes = 256 * 1024 * 1024 // 256 MiB
-
-	// maxEntries bounds how many archive entries a single call will walk.
-	// Guards against an entry-count bomb (millions of near-empty entries).
-	maxEntries = 100_000
+	//
+	// This is deliberately small (3 MiB), NOT a generous "bomb" ceiling:
+	// the Axiom node transport itself caps a single request/response
+	// message at 4 MiB (the standard grpc-go default), independent of
+	// anything this package declares. An earlier version of this package
+	// advertised 256 MiB/512 MiB caps that were never actually reachable —
+	// any real payload over ~4 MiB failed with an opaque transport-level
+	// 502 "ResourceExhausted" instead of this package's own structured
+	// error. 3 MiB leaves headroom under the 4 MiB ceiling for protobuf/
+	// JSON framing overhead and any other fields on the same message.
+	maxRawInputBytes = 3 * 1024 * 1024 // 3 MiB
 
 	// maxSymlinkTargetBytes bounds reading a zip symlink entry's tiny
 	// "content" (which IS the link target, per the zip symlink convention)
@@ -78,11 +84,30 @@ const (
 	defaultFileMode = 0o644
 )
 
-// maxTotalUncompressedBytes is the shared decompression budget for a
-// single node invocation — see the package doc comment above. A var (not
-// a const) purely so tests can shrink it temporarily to exercise the cap
-// cheaply instead of allocating real half-gigabyte fixtures.
-var maxTotalUncompressedBytes int64 = 512 * 1024 * 1024 // 512 MiB
+// maxTotalUncompressedBytes is the shared decompression/output budget for
+// a single node invocation — see the package doc comment above. Also kept
+// under the ~4 MiB node-transport message ceiling (see maxRawInputBytes's
+// comment) since this budget bounds bytes that flow back out in the
+// response message (ExtractAllResult, EntryData, CompressionResult) — a
+// node that decompressed a full 512 MiB internally would still fail
+// trying to RETURN that many bytes over the transport. A var (not a
+// const) purely so tests can shrink it temporarily to exercise the cap
+// cheaply instead of allocating real multi-megabyte fixtures.
+var maxTotalUncompressedBytes int64 = 3 * 1024 * 1024 // 3 MiB
+
+// maxEntries bounds how many archive entries a single call will walk.
+// Guards against an entry-count bomb (many near-empty entries). Lowered
+// from an earlier 100,000 to 5,000: with maxRawInputBytes now 3 MiB (see
+// above), a tar archive cannot physically contain 100,000 entries within
+// the raw-input cap anyway (each tar entry costs a minimum 512-byte
+// header), which made that cap dead code the raw-input cap always
+// preempted. 5,000 is comfortably reachable within 3 MiB for both tar
+// (~2.5 MiB of headers alone) and zip, so it is a real, independently
+// testable second line of defense rather than an unreachable formality —
+// and still far more entries than a normal archive this size would ever
+// contain. A var (not a const) so tests can shrink it further when only
+// the cap-triggering behavior, not a specific count, is being exercised.
+var maxEntries = 5000
 
 // checkRawInputSize is the first thing every node calls on caller-supplied
 // archive/compressed bytes.
@@ -104,6 +129,13 @@ func checkRawInputSize(data []byte) error {
 // on this package's Unix-style path handling), no Windows drive letter,
 // and does not escape the root via a ".." component once lexically
 // cleaned.
+//
+// A path that cleans to exactly "." (e.g. the literal string ".", or "./",
+// or "a/..") is treated as SAFE: it names the container's own root, which
+// the ubiquitous `tar -C dir .` idiom records as an explicit "./" entry.
+// It carries no traversal risk (there is nothing to escape to) — flagging
+// it as unsafe only produced false positives on completely ordinary
+// archives without catching any real zip-slip attempt.
 func sanitizePath(p string) (safe bool) {
 	if p == "" {
 		return false
@@ -121,7 +153,7 @@ func sanitizePath(p string) (safe bool) {
 		return false
 	}
 	cleaned := path.Clean(p)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
 		return false
 	}
 	return true
