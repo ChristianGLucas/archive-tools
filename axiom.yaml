@@ -8,10 +8,12 @@ description: >-
   wrapping the Go standard library (archive/tar, archive/zip, compress/*)
   and the zero-dependency pure-Go klauspost/compress (zstd) and
   ulikunitz/xz libraries. No cgo, no native library, offline and
-  deterministic. Guards against zip-slip path traversal and
-  decompression/entry-count bombs on every archive-opening node. A natural
-  downstream of christiangeorgelucas/filetype-tools (detect "archive"
-  category, then hand the same bytes here).
+  deterministic. Guards against zip-slip path traversal on every node that
+  handles entry paths, an entry-count cap on every archive-opening node,
+  and a total-decompressed-bytes cap on every node that reads entry
+  DATA (not the header-only scans). A natural downstream of
+  christiangeorgelucas/filetype-tools (detect "archive" category, then
+  hand the same bytes here).
 nodes:
     - name: DetectFormat
       input: ArchiveInput
@@ -34,20 +36,25 @@ nodes:
         mode, mtime, type (file/dir/symlink/other), per-entry compressed
         size (zip only), symlink target, and whether its path is safe
         (not absolute, no ".." traversal). Metadata only — no entry bytes
-        are returned; use ReadEntry or ExtractAll for that. Bounded by an
-        entry-count cap (5,000) and a total-uncompressed-bytes cap
-        (3 MiB) to guard against zip/decompression bombs; `truncated`
-        is set true if a cap was hit.
+        are read or returned (headers only; the reported `size` is the
+        archive's own declared value, not independently verified); use
+        ReadEntry or ExtractAll to read actual bytes. Bounded by an
+        entry-count cap (5,000) to guard against an entry-count bomb;
+        `truncated` is set true if the cap was hit. (The decompressed-size
+        cap does not apply here — it only bounds nodes that read entry
+        DATA, which ListEntries never does.)
     - name: GetArchiveSummary
       input: ArchiveInput
       output: ArchiveSummary
       description: >-
-        Cheaper archive-level summary than ListEntries when only counts and
-        totals are needed: container format, compression, entry count,
+        Archive-level summary: container format, compression, entry count,
         total uncompressed/compressed size, whether the archive contains
-        any directories or symlinks. Subject to the same entry-count and
-        total-uncompressed-bytes caps as ListEntries; `truncated` is set
-        true if a cap was hit before the scan finished.
+        any directories or symlinks. Same scan cost as ListEntries (both
+        read entry headers only, never entry data) — the difference is a
+        much smaller response when only totals are needed, not less
+        computation. Subject to the same entry-count cap as ListEntries;
+        `truncated` is set true if the cap was hit before the scan
+        finished.
     - name: ReadEntry
       input: ReadEntryRequest
       output: EntryData
@@ -57,8 +64,10 @@ nodes:
         path as reported by ListEntries. Returns a structured error if the
         path does not exist in the archive, names a directory (no bytes to
         read), or is itself an unsafe path (absolute or containing "..") —
-        never partially honors an unsafe request. Subject to the same
-        decompression-bomb caps as ListEntries.
+        never partially honors an unsafe request. Also errors (rather than
+        returning a truncated partial file) if the entry's decompressed
+        size exceeds the 3 MiB total-size cap, or if more than 5,000
+        entries are scanned before the target path is found.
     - name: ExtractAll
       input: ArchiveInput
       output: ExtractAllResult
@@ -70,9 +79,11 @@ nodes:
         ListEntries for those). Any entry with an unsafe path (absolute or
         containing "..") is excluded from `entries` and its path is
         reported in `skipped_unsafe_paths` instead of being silently
-        dropped or honored. Bounded by the same entry-count (5,000) and
-        total-uncompressed-bytes (3 MiB) caps as ListEntries;
-        `truncated` is set true if a cap was hit.
+        dropped or honored. Unlike ListEntries (headers only), this node
+        reads real entry bytes, so it is bounded by both an entry-count
+        cap (5,000) and a total-decompressed-bytes cap (3 MiB); `truncated`
+        is set true and a partial-but-valid result is returned if either
+        cap is hit.
     - name: CreateTar
       input: CreateArchiveRequest
       output: ArchiveResult
@@ -137,8 +148,9 @@ nodes:
       output: CompressionResult
       description: >-
         Decompress a standalone compressed stream: "gzip", "zlib", "xz",
-        "zstd", or "bzip2". Bounded by a total-output-bytes cap (3 MiB)
-        to guard against decompression bombs — `truncated` is set true and
-        the error field describes the cap if it is hit before the stream
-        ends. Returns a structured error for an unrecognized codec or
-        malformed/corrupt input.
+        "zstd", or "bzip2". Bounded by a total-output-bytes cap (3 MiB) to
+        guard against decompression bombs — this is NOT an error: if the
+        cap is hit, the call still succeeds with `truncated=true` and
+        `data` holding exactly the bytes produced up to the cap. Returns a
+        structured error only for an unrecognized codec or malformed/
+        corrupt input (never for hitting the size cap).
