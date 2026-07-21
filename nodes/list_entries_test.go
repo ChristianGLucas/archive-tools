@@ -1,0 +1,111 @@
+package nodes
+
+import (
+	"fmt"
+	"testing"
+
+	gen "christiangeorgelucas/archive-tools/gen"
+)
+
+func TestListEntries_TarAgainstSystemTar(t *testing.T) {
+	tarBytes := refTarWithSymlink(t, "file.txt", "hello world", "adir", "alink", "file.txt")
+	out, err := ListEntries(testCtxBG, testAx, &gen.ArchiveInput{Data: tarBytes})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Truncated {
+		t.Fatalf("unexpectedly truncated")
+	}
+	byPath := map[string]*gen.ArchiveEntry{}
+	for _, e := range out.Entries {
+		byPath[e.Path] = e
+	}
+	f, ok := byPath["file.txt"]
+	if !ok || f.Type != gen.EntryType_ENTRY_TYPE_FILE || f.Size != int64(len("hello world")) || !f.PathSafe {
+		t.Fatalf("file.txt entry wrong: %+v", f)
+	}
+	d, ok := byPath["adir/"]
+	if !ok {
+		// some tar implementations record the dir without trailing slash
+		d, ok = byPath["adir"]
+	}
+	if !ok || d.Type != gen.EntryType_ENTRY_TYPE_DIR {
+		t.Fatalf("adir entry wrong or missing: %+v (all: %+v)", d, byPath)
+	}
+	l, ok := byPath["alink"]
+	if !ok || l.Type != gen.EntryType_ENTRY_TYPE_SYMLINK || l.SymlinkTarget != "file.txt" {
+		t.Fatalf("alink entry wrong: %+v", l)
+	}
+}
+
+func TestListEntries_ZipAgainstSystemZip(t *testing.T) {
+	zipBytes := refZip(t, map[string]string{"one.txt": "111", "sub/two.txt": "22"})
+	out, err := ListEntries(testCtxBG, testAx, &gen.ArchiveInput{Data: zipBytes})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Count != int32(len(out.Entries)) {
+		t.Fatalf("count %d != len(entries) %d", out.Count, len(out.Entries))
+	}
+	found := map[string]bool{}
+	for _, e := range out.Entries {
+		found[e.Path] = true
+		if e.Path == "one.txt" && e.Size != 3 {
+			t.Fatalf("one.txt size = %d, want 3", e.Size)
+		}
+	}
+	if !found["one.txt"] || !found["sub/two.txt"] {
+		t.Fatalf("missing expected entries: %+v", out.Entries)
+	}
+}
+
+func TestListEntries_UnsafePathFlagged(t *testing.T) {
+	// Hand-build a minimal tar with a traversal entry name using our own
+	// writeTar (already proven against the system tar reader elsewhere) —
+	// here we only need SOME tar bytes containing an unsafe name; the
+	// system `tar` CLI refuses to create such archives directly, so we use
+	// our own writer with strictPaths bypassed via direct struct construction.
+	data, err := writeTar([]rawEntry{{path: "../../etc/passwd", typ: gen.EntryType_ENTRY_TYPE_FILE, data: []byte("x"), mode: 0o644}})
+	if err != nil {
+		t.Fatalf("writeTar: %v", err)
+	}
+	out, err := ListEntries(testCtxBG, testAx, &gen.ArchiveInput{Data: data})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out.Entries) != 1 || out.Entries[0].PathSafe {
+		t.Fatalf("expected one entry flagged path_safe=false, got %+v", out.Entries)
+	}
+}
+
+func TestListEntries_MalformedInput(t *testing.T) {
+	_, err := ListEntries(testCtxBG, testAx, &gen.ArchiveInput{Data: []byte("this is not an archive")})
+	if err == nil {
+		t.Fatal("expected an error for non-archive input, got nil")
+	}
+}
+
+func TestListEntries_EntryCountCap(t *testing.T) {
+	entries := make([]rawEntry, maxEntries+10)
+	for i := range entries {
+		entries[i] = rawEntry{path: pad(i), typ: gen.EntryType_ENTRY_TYPE_FILE}
+	}
+	data, err := writeTar(entries)
+	if err != nil {
+		t.Fatalf("writeTar: %v", err)
+	}
+	out, err := ListEntries(testCtxBG, testAx, &gen.ArchiveInput{Data: data})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Truncated {
+		t.Fatalf("expected truncated=true for an archive over the entry-count cap")
+	}
+	if len(out.Entries) != maxEntries {
+		t.Fatalf("expected exactly %d entries on truncation, got %d", maxEntries, len(out.Entries))
+	}
+}
+
+func pad(i int) string {
+	return fmt.Sprintf("f%08d", i)
+}

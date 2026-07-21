@@ -1,0 +1,270 @@
+// Data contracts for christiangeorgelucas/archive-tools — deterministic,
+// stateless inspection and manipulation of archive CONTAINER formats (tar,
+// zip, and their compressed variants) and the standalone compression codecs
+// (gzip, bzip2, xz, zstd, zlib) that wrap them. Wraps the Go standard
+// library (archive/tar, archive/zip, compress/*) plus two zero-dependency,
+// permissively-licensed pure-Go libraries: github.com/klauspost/compress
+// (BSD-3-Clause/MIT, zstd) and github.com/ulikunitz/xz (BSD-3-Clause-style,
+// xz). No cgo, no native library, no filesystem or network access — every
+// node is a pure bytes-in/bytes-out transform over caller-supplied data.
+//
+// Every node here takes archive/compressed bytes as input and returns
+// bytes/metadata as output; nothing is ever read from a real filesystem or
+// fetched from a URL. A natural downstream of christiangeorgelucas/
+// filetype-tools (detect a blob is "archive" category, then hand the same
+// `data` bytes here) — this package follows that package's convention of
+// naming the primary byte-payload field `data` throughout.
+//
+// SAFETY (see nodes/helper.go for the enforced bounds):
+//   - Entry paths are sanitized against zip-slip / path traversal. An
+//     unsafe path (absolute, or containing a ".." component that would
+//     escape a notional extraction root) is never silently honored: a
+//     single-entry request (ReadEntry) errors immediately; a multi-entry
+//     result (ExtractAll) skips the unsafe entry and reports it in
+//     `skipped_unsafe_paths` rather than returning its bytes.
+//   - Total decompressed bytes and entry COUNT are capped on every archive-
+//     opening operation, checked against the RAW input as bytes are
+//     consumed (not trusted from a declared header field), to bound memory
+//     use against decompression/zip bombs. Exceeding a cap returns a
+//     structured error, never an unbounded allocation.
+//   - Symlink entries are surfaced as metadata (type + target string) only
+//     — never resolved or followed. Nothing is ever written to a real
+//     filesystem, so "following" a symlink never occurs.
+
+syntax = "proto3";
+
+package christiangeorgelucas.archive_tools;
+
+option go_package = ".;gen";
+
+// What kind of filesystem object an archive entry represents.
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  ENTRY_TYPE_FILE = 1;
+  ENTRY_TYPE_DIR = 2;
+  ENTRY_TYPE_SYMLINK = 3;
+  // A recognized-but-uncommon entry kind (device node, FIFO, hard link,
+  // etc.) that tar supports but this package does not further classify.
+  ENTRY_TYPE_OTHER = 4;
+}
+
+// One entry's metadata within an archive, as reported by ListEntries. The
+// `data` field is always empty here — ListEntries reports metadata only;
+// use ReadEntry or ExtractAll to retrieve entry bytes.
+message ArchiveEntry {
+  // Entry path/name as recorded in the archive, unmodified.
+  string path = 1;
+  // Uncompressed size in bytes, from the archive's own metadata.
+  int64 size = 2;
+  // POSIX file mode bits (permissions + type bits), as recorded.
+  uint32 mode = 3;
+  // Modification time as a Unix epoch second (0 if unset/unknown).
+  int64 mtime = 4;
+  // File / directory / symlink / other, per the archive's own type tag.
+  EntryType type = 5;
+  // Per-entry compressed size in bytes. Populated for zip (which records
+  // it per-entry); 0 for tar (a tar entry has no independent per-entry
+  // compressed size — any compression wraps the whole stream, not the
+  // individual entry).
+  int64 compressed_size = 6;
+  // For ENTRY_TYPE_SYMLINK entries, the raw link target string as recorded
+  // in the archive. Never resolved, followed, or validated — metadata only.
+  string symlink_target = 7;
+  // False when `path` is unsafe (absolute, or escapes a notional
+  // extraction root via a ".." component) — surfaced so a caller can see
+  // and reject it, since this package never extracts to a real filesystem
+  // where such a path could otherwise do damage.
+  bool path_safe = 8;
+}
+
+// Input for nodes that open a whole archive without needing to select or
+// modify one entry: ListEntries, GetArchiveSummary, ExtractAll.
+message ArchiveInput {
+  // Raw archive bytes (base64-encoded over the JSON bridge). May be a bare
+  // tar or zip, or a tar wrapped in an outer gzip/bzip2/xz/zstd stream
+  // (e.g. .tar.gz) — auto-detected unless `format_hint` is set.
+  bytes data = 1;
+  // Optional override of auto-detection. One of "tar", "zip", "tar.gz",
+  // "tar.bz2", "tar.xz", "tar.zst". Empty means auto-detect from magic
+  // bytes. Set this when a bare/ambiguous stream would otherwise be
+  // misdetected.
+  string format_hint = 2;
+}
+
+// Result of DetectFormat: what a byte blob's leading bytes identify it as,
+// split into the multi-file CONTAINER layer and the outer COMPRESSION
+// wrap, since the two are independent (e.g. a .tar.gz is container "tar"
+// wrapped in compression "gzip"; a bare .zip is container "zip" with
+// compression "none" since zip compresses per-entry internally, not as an
+// outer stream).
+message FormatInfo {
+  // True when at least the outer layer (container and/or compression) was
+  // recognized. False when the bytes match none of this package's known
+  // signatures (including an empty input).
+  bool recognized = 1;
+  // Recognized container format: "tar", "zip", or "" if none/unrecognized
+  // (e.g. a bare compressed stream with no archive container, like a
+  // gzip-compressed single file).
+  string container_format = 2;
+  // Recognized outer compression wrap: "gzip", "bzip2", "xz", "zstd", or
+  // "none" if the bytes are not compressed at the outer level.
+  string compression = 3;
+  // Human-readable combined label, e.g. "tar+gzip", "zip", "xz" (bare
+  // compressed stream, no container detected).
+  string label = 4;
+}
+
+// Archive-level summary metadata, without any entry bytes or even a full
+// per-entry list — cheaper than ListEntries when a caller only needs
+// counts/totals.
+message ArchiveSummary {
+  string container_format = 1;
+  string compression = 2;
+  int32 entry_count = 3;
+  int64 total_uncompressed_size = 4;
+  int64 total_compressed_size = 5;
+  bool has_dirs = 6;
+  bool has_symlinks = 7;
+  // True when this package's entry-count cap (100,000) was hit while
+  // scanning headers — the summary reflects only what was scanned before
+  // the cap stopped further reading, not the true archive totals. Neither
+  // ListEntries nor GetArchiveSummary reads entry DATA (only headers), so
+  // only the entry-count cap — never the decompressed-size cap — can
+  // trigger truncation here.
+  bool truncated = 8;
+}
+
+// Output of ListEntries.
+message EntryList {
+  repeated ArchiveEntry entries = 1;
+  int32 count = 2;
+  // True when the entry-count cap (100,000) was hit — `entries`/`count`
+  // reflect only the entries scanned before the cap stopped further
+  // reading. ListEntries never reads entry DATA (only headers), so only
+  // the entry-count cap — never the decompressed-size cap — can trigger
+  // truncation here.
+  bool truncated = 3;
+}
+
+// Input for ReadEntry: pull one named entry's bytes out of an archive.
+message ReadEntryRequest {
+  bytes data = 1;
+  // Exact entry path to read, as it appears in the archive (see
+  // ListEntries output for the exact strings). Must not be an unsafe path
+  // (absolute or escaping via ".."); such a request errors rather than
+  // returning anything.
+  string path = 2;
+  string format_hint = 3;
+}
+
+// One extracted entry: its path and full uncompressed bytes.
+message EntryData {
+  string path = 1;
+  bytes data = 2;
+  int64 size = 3;
+}
+
+// Output of ExtractAll: every entry's bytes, normalized into an in-memory
+// list.
+message ExtractAllResult {
+  // Only FILE-type entries with a safe path are included here (directory
+  // and symlink entries carry no extractable bytes and are omitted; see
+  // ListEntries for full structural metadata including dirs/symlinks).
+  repeated EntryData entries = 1;
+  int32 count = 2;
+  // Paths that were present in the archive but excluded because they were
+  // unsafe (absolute or escaping via ".."), surfaced rather than silently
+  // dropped or written anywhere.
+  repeated string skipped_unsafe_paths = 3;
+  // True when the entry-count or total-decompressed-size cap was hit —
+  // `entries` reflects only what was extracted before the cap stopped
+  // further reading.
+  bool truncated = 4;
+}
+
+// One entry to place into a newly created (or modified) archive.
+message CreateEntry {
+  // Path/name to record for this entry. Must not be an unsafe path
+  // (absolute or containing ".."); an unsafe path fails the whole create
+  // request with a structured error (unlike read-side operations, nothing
+  // here is silently dropped — the caller controls every entry supplied).
+  string path = 1;
+  bytes data = 2;
+  // POSIX permission bits to record (e.g. 0644). 0 defaults to 0644 for
+  // files.
+  uint32 mode = 3;
+}
+
+// Input for CreateTar / CreateZip: build a fresh archive from in-memory
+// entries.
+message CreateArchiveRequest {
+  repeated CreateEntry entries = 1;
+}
+
+// Output of any node that produces archive bytes (CreateTar, CreateZip,
+// AddEntry, RemoveEntry, ConvertContainer).
+message ArchiveResult {
+  bytes data = 1;
+  int32 entry_count = 2;
+  int64 size = 3;
+}
+
+// Input for AddEntry: append/overwrite one entry in an existing archive.
+message AddEntryRequest {
+  // The existing archive to add to (tar or zip; bare, not compressed —
+  // see ConvertContainer/CompressStream to work with a compressed
+  // outer wrap first).
+  bytes data = 1;
+  string path = 2;
+  bytes entry_data = 3;
+  uint32 mode = 4;
+  string format_hint = 5;
+}
+
+// Input for RemoveEntry: return a copy of the archive with one entry
+// removed.
+message RemoveEntryRequest {
+  bytes data = 1;
+  string path = 2;
+  string format_hint = 3;
+}
+
+// Input for ConvertContainer: re-encode an archive's entries into a
+// different container format, preserving path/data/mode for every entry.
+message ConvertRequest {
+  bytes data = 1;
+  // Target container format: "tar" or "zip".
+  string target_format = 2;
+  string format_hint = 3;
+}
+
+// Input for CompressStream: wrap raw bytes in a compression codec.
+message CompressRequest {
+  bytes data = 1;
+  // One of "gzip", "zlib", "xz", "zstd". (bzip2 is decode-only in this
+  // package — see DecompressStream's doc comment.)
+  string codec = 2;
+  // Optional compression level. 0 means "use the codec's default".
+  // Ignored for codecs without a meaningful level knob.
+  int32 level = 3;
+}
+
+// Input for DecompressStream: unwrap a compressed stream back to raw
+// bytes.
+message DecompressRequest {
+  bytes data = 1;
+  // One of "gzip", "zlib", "xz", "zstd", "bzip2".
+  string codec = 2;
+}
+
+// Output of CompressStream / DecompressStream.
+message CompressionResult {
+  bytes data = 1;
+  string codec = 2;
+  int64 input_size = 3;
+  int64 output_size = 4;
+  // True when the total-decompressed-size cap was hit during
+  // DecompressStream — `data` holds only the bytes produced before the
+  // cap stopped further reading. Always false for CompressStream.
+  bool truncated = 5;
+}

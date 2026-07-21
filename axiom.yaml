@@ -1,0 +1,144 @@
+name: christiangeorgelucas/archive-tools
+version: 0.1.0
+language: go
+description: >-
+  Composable Axiom archive-container nodes (detect, list, read, extract,
+  create, add/remove entries, convert between tar and zip) plus standalone
+  compression codec nodes (gzip/zlib/xz/zstd compress, +bzip2 decompress),
+  wrapping the Go standard library (archive/tar, archive/zip, compress/*)
+  and the zero-dependency pure-Go klauspost/compress (zstd) and
+  ulikunitz/xz libraries. No cgo, no native library, offline and
+  deterministic. Guards against zip-slip path traversal and
+  decompression/entry-count bombs on every archive-opening node. A natural
+  downstream of christiangeorgelucas/filetype-tools (detect "archive"
+  category, then hand the same bytes here).
+nodes:
+    - name: DetectFormat
+      input: ArchiveInput
+      output: FormatInfo
+      description: >-
+        Identify a byte blob's archive container format (tar/zip) and outer
+        compression wrap (gzip/bzip2/xz/zstd/none) from its leading magic
+        bytes, without fully parsing it. E.g. a .tar.gz reports
+        container_format="tar", compression="gzip"; a bare .zip reports
+        container_format="zip", compression="none" (zip compresses
+        per-entry internally, not as an outer stream); a bare .xz with no
+        tar inside reports container_format="", compression="xz". Returns
+        recognized=false for unrecognized or empty input.
+    - name: ListEntries
+      input: ArchiveInput
+      output: EntryList
+      description: >-
+        List every entry in a tar or zip archive (auto-detecting a
+        compressed outer wrap like .tar.gz) with its metadata: path, size,
+        mode, mtime, type (file/dir/symlink/other), per-entry compressed
+        size (zip only), symlink target, and whether its path is safe
+        (not absolute, no ".." traversal). Metadata only — no entry bytes
+        are returned; use ReadEntry or ExtractAll for that. Bounded by an
+        entry-count cap (100,000) and a total-uncompressed-bytes cap
+        (512 MiB) to guard against zip/decompression bombs; `truncated`
+        is set true if a cap was hit.
+    - name: GetArchiveSummary
+      input: ArchiveInput
+      output: ArchiveSummary
+      description: >-
+        Cheaper archive-level summary than ListEntries when only counts and
+        totals are needed: container format, compression, entry count,
+        total uncompressed/compressed size, whether the archive contains
+        any directories or symlinks. Subject to the same entry-count and
+        total-uncompressed-bytes caps as ListEntries; `truncated` is set
+        true if a cap was hit before the scan finished.
+    - name: ReadEntry
+      input: ReadEntryRequest
+      output: EntryData
+      description: >-
+        Read one named entry's full uncompressed bytes out of a tar or zip
+        archive (auto-detecting a compressed outer wrap), by its exact
+        path as reported by ListEntries. Returns a structured error if the
+        path does not exist in the archive, names a directory (no bytes to
+        read), or is itself an unsafe path (absolute or containing "..") —
+        never partially honors an unsafe request. Subject to the same
+        decompression-bomb caps as ListEntries.
+    - name: ExtractAll
+      input: ArchiveInput
+      output: ExtractAllResult
+      description: >-
+        Extract every FILE-type entry's bytes from a tar or zip archive
+        (auto-detecting a compressed outer wrap) into a normalized
+        in-memory list of {path, data, size} — never to a real filesystem.
+        Directory and symlink entries carry no bytes and are omitted (see
+        ListEntries for those). Any entry with an unsafe path (absolute or
+        containing "..") is excluded from `entries` and its path is
+        reported in `skipped_unsafe_paths` instead of being silently
+        dropped or honored. Bounded by the same entry-count (100,000) and
+        total-uncompressed-bytes (512 MiB) caps as ListEntries;
+        `truncated` is set true if a cap was hit.
+    - name: CreateTar
+      input: CreateArchiveRequest
+      output: ArchiveResult
+      description: >-
+        Build a fresh, uncompressed tar archive from a list of in-memory
+        {path, data, mode} entries — entirely in memory, no real
+        filesystem involved. Every entry's path is validated safe
+        (not absolute, no ".." component); an unsafe path fails the whole
+        request with a structured error, since every entry here is
+        caller-supplied and none should be silently dropped. Duplicate
+        paths are all written (last write is what most tar readers will
+        see on extraction, matching standard tar semantics).
+    - name: CreateZip
+      input: CreateArchiveRequest
+      output: ArchiveResult
+      description: >-
+        Build a fresh zip archive (DEFLATE-compressed) from a list of
+        in-memory {path, data, mode} entries — entirely in memory, no real
+        filesystem involved. Same path-safety validation and duplicate-path
+        behavior as CreateTar.
+    - name: AddEntry
+      input: AddEntryRequest
+      output: ArchiveResult
+      description: >-
+        Return a copy of an existing (uncompressed) tar or zip archive with
+        one entry appended — if `path` already exists in the archive, the
+        new entry is added alongside it (both are present; readers that
+        take "last entry wins" will see the new one, matching standard
+        tar/zip semantics), it is not an atomic replace. Rejects an unsafe
+        `path` (absolute or containing "..") with a structured error rather
+        than adding it.
+    - name: RemoveEntry
+      input: RemoveEntryRequest
+      output: ArchiveResult
+      description: >-
+        Return a copy of an existing (uncompressed) tar or zip archive with
+        every entry matching the exact given `path` removed. Returns a
+        structured error if no entry matches. A no-op copy is never
+        silently returned for a missing path — absence is always reported.
+    - name: ConvertContainer
+      input: ConvertRequest
+      output: ArchiveResult
+      description: >-
+        Re-encode an archive's entries from one container format into
+        another (zip -> tar or tar -> zip; auto-detecting a compressed
+        outer wrap on the source), preserving every entry's path, bytes,
+        and mode. The result is always an uncompressed container in the
+        target format — wrap it with CompressStream afterward (e.g.
+        codec="gzip") to reproduce a compressed variant like .tar.gz.
+    - name: CompressStream
+      input: CompressRequest
+      output: CompressionResult
+      description: >-
+        Compress raw bytes with a standalone codec: "gzip", "zlib", "xz",
+        or "zstd". (bzip2 has no compressor in this package's pure-Go,
+        zero-cgo dependency set — Go's standard library bzip2 package is
+        decode-only; see DecompressStream.) `level` is an optional
+        codec-specific compression level; 0 uses the codec's default.
+        Returns a structured error for an unrecognized codec.
+    - name: DecompressStream
+      input: DecompressRequest
+      output: CompressionResult
+      description: >-
+        Decompress a standalone compressed stream: "gzip", "zlib", "xz",
+        "zstd", or "bzip2". Bounded by a total-output-bytes cap (512 MiB)
+        to guard against decompression bombs — `truncated` is set true and
+        the error field describes the cap if it is hit before the stream
+        ends. Returns a structured error for an unrecognized codec or
+        malformed/corrupt input.
