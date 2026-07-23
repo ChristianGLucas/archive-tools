@@ -1,6 +1,6 @@
 # archive-tools
 
-Composable [Axiom](https://axiom.co) node package for deterministic, stateless
+Composable [Axiom](https://axiomide.com) node package for deterministic, stateless
 inspection and manipulation of archive **container** formats (tar, zip, and
 their compressed variants) and the standalone **compression codecs**
 (gzip, zlib, xz, zstd, +bzip2 decompress) that wrap them.
