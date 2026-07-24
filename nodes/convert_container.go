@@ -15,9 +15,6 @@ import (
 // the target format — wrap it with CompressStream afterward to reproduce a
 // compressed variant like .tar.gz.
 func ConvertContainer(ctx context.Context, ax axiom.Context, input *gen.ConvertRequest) (*gen.ArchiveResult, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	target := input.GetTargetFormat()
 	if target != "tar" && target != "zip" {
 		return nil, fmt.Errorf("unrecognized target_format %q — expected \"tar\" or \"zip\"", target)
@@ -27,12 +24,9 @@ func ConvertContainer(ctx context.Context, ax axiom.Context, input *gen.ConvertR
 	if err != nil {
 		return nil, err
 	}
-	entries, _, truncated, err := walkData(oc, true)
+	entries, _, err := walkData(oc, true)
 	if err != nil {
 		return nil, err
-	}
-	if truncated {
-		return nil, fmt.Errorf("source archive exceeds this package's entry-count/size caps — refusing to convert a partially-read archive")
 	}
 
 	data, err := writeContainer(target, entries)

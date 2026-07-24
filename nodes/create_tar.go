@@ -15,10 +15,6 @@ import (
 // A path ending in "/" is treated as a directory entry (its data, if any,
 // is ignored); everything else is a regular file.
 func entriesFromCreateRequest(req *gen.CreateArchiveRequest) ([]rawEntry, error) {
-	if len(req.GetEntries()) > maxEntries {
-		return nil, fmt.Errorf("request has %d entries, exceeding the entry-count cap of %d", len(req.GetEntries()), maxEntries)
-	}
-	var total int64
 	entries := make([]rawEntry, 0, len(req.GetEntries()))
 	for _, ce := range req.GetEntries() {
 		p := ce.GetPath()
@@ -28,10 +24,6 @@ func entriesFromCreateRequest(req *gen.CreateArchiveRequest) ([]rawEntry, error)
 		if isDirPath(p) {
 			entries = append(entries, rawEntry{path: p, typ: gen.EntryType_ENTRY_TYPE_DIR, mode: ce.GetMode()})
 			continue
-		}
-		total += int64(len(ce.GetData()))
-		if total > maxTotalUncompressedBytes {
-			return nil, fmt.Errorf("requested entries total more than the %d-byte size cap", maxTotalUncompressedBytes)
 		}
 		entries = append(entries, rawEntry{
 			path: p,

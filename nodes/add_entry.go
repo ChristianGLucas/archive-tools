@@ -16,27 +16,18 @@ import (
 // pre-existing entry's) with a structured error rather than carrying it
 // forward silently.
 func AddEntry(ctx context.Context, ax axiom.Context, input *gen.AddEntryRequest) (*gen.ArchiveResult, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	newPath := input.GetPath()
 	if !sanitizePath(newPath) {
 		return nil, fmt.Errorf("entry path %q is unsafe (absolute or escapes via \"..\") — refusing to add it", newPath)
-	}
-	if int64(len(input.GetEntryData())) > maxTotalUncompressedBytes {
-		return nil, fmt.Errorf("new entry is %d bytes, exceeding the %d-byte size cap", len(input.GetEntryData()), maxTotalUncompressedBytes)
 	}
 
 	oc, err := openContainer(input.GetData(), input.GetFormatHint())
 	if err != nil {
 		return nil, err
 	}
-	entries, _, truncated, err := walkData(oc, true)
+	entries, _, err := walkData(oc, true)
 	if err != nil {
 		return nil, err
-	}
-	if truncated {
-		return nil, fmt.Errorf("source archive exceeds this package's entry-count/size caps — refusing to modify a partially-read archive")
 	}
 
 	entries = append(entries, rawEntry{

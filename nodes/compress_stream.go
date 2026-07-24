@@ -22,9 +22,6 @@ import (
 // for xz, which has no simple integer level knob in the wrapped library);
 // 0 uses the codec's default.
 func CompressStream(ctx context.Context, ax axiom.Context, input *gen.CompressRequest) (*gen.CompressionResult, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	data := input.GetData()
 	var out bytes.Buffer
 

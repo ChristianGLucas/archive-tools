@@ -72,11 +72,3 @@ func TestCompressStream_UnknownCodec(t *testing.T) {
 		t.Fatal("expected an error for an unrecognized codec, got nil")
 	}
 }
-
-func TestCompressStream_RawInputCap(t *testing.T) {
-	big := make([]byte, maxRawInputBytes+1)
-	_, err := CompressStream(testCtxBG, testAx, &gen.CompressRequest{Data: big, Codec: "gzip"})
-	if err == nil {
-		t.Fatal("expected an error for input exceeding the raw-input cap, got nil")
-	}
-}

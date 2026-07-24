@@ -58,30 +58,23 @@ func TestExtractAll_DirsAndSymlinksOmittedFromData(t *testing.T) {
 	}
 }
 
-func TestExtractAll_DecompressionBombCapTruncates(t *testing.T) {
-	// Shrink the budget for this test so we can prove the cap fires without
-	// allocating a real half-gigabyte fixture — a small entry (1000 bytes)
-	// against a tiny budget (100 bytes) exercises exactly the same code
-	// path a real gzip-bomb (small compressed input, huge decompressed
-	// output) would hit.
-	orig := maxTotalUncompressedBytes
-	maxTotalUncompressedBytes = 100
-	defer func() { maxTotalUncompressedBytes = orig }()
-
+func TestExtractAll_LargeEntryReturnedWhole(t *testing.T) {
+	// This package no longer imposes its own per-entry size ceiling — a
+	// larger-than-trivial entry should come back whole, not truncated.
 	data := make([]byte, 1000)
-	tarBytes, err := writeTar([]rawEntry{{path: "bomb.bin", typ: gen.EntryType_ENTRY_TYPE_FILE, data: data, mode: 0o644}})
+	for i := range data {
+		data[i] = byte(i)
+	}
+	tarBytes, err := writeTar([]rawEntry{{path: "big.bin", typ: gen.EntryType_ENTRY_TYPE_FILE, data: data, mode: 0o644}})
 	if err != nil {
 		t.Fatalf("writeTar: %v", err)
 	}
 	out, err := ExtractAll(testCtxBG, testAx, &gen.ArchiveInput{Data: tarBytes})
 	if err != nil {
-		t.Fatalf("expected a truncated result, not an error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !out.Truncated {
-		t.Fatalf("expected truncated=true for an archive whose entry exceeds the size cap")
-	}
-	if len(out.Entries) != 1 || len(out.Entries[0].Data) != 100 {
-		t.Fatalf("expected exactly 100 bytes of partial data, got entries=%+v", out.Entries)
+	if len(out.Entries) != 1 || len(out.Entries[0].Data) != 1000 {
+		t.Fatalf("expected exactly 1000 bytes of whole data, got entries=%+v", out.Entries)
 	}
 }
 

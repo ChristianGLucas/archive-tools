@@ -11,14 +11,11 @@ import (
 // whether it contains directories/symlinks) without returning a per-entry
 // list. Like ListEntries, it reads entry headers only, never entry data.
 func GetArchiveSummary(ctx context.Context, ax axiom.Context, input *gen.ArchiveInput) (*gen.ArchiveSummary, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	oc, err := openContainer(input.GetData(), input.GetFormatHint())
 	if err != nil {
 		return nil, err
 	}
-	raws, truncated, err := walkHeaders(oc)
+	raws, err := walkHeaders(oc)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +24,6 @@ func GetArchiveSummary(ctx context.Context, ax axiom.Context, input *gen.Archive
 		ContainerFormat: oc.kind,
 		Compression:     oc.compression,
 		EntryCount:      int32(len(raws)),
-		Truncated:       truncated,
 	}
 	for _, re := range raws {
 		switch re.typ {

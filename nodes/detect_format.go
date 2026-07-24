@@ -13,8 +13,5 @@ import (
 // prefix of any compressed stream is peeked, to check for a tar signature
 // inside).
 func DetectFormat(ctx context.Context, ax axiom.Context, input *gen.ArchiveInput) (*gen.FormatInfo, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	return detectFormatInfo(input.GetData()), nil
 }

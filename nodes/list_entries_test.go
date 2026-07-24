@@ -16,9 +16,6 @@ func TestListEntries_TarAgainstSystemTar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out.Truncated {
-		t.Fatalf("unexpectedly truncated")
-	}
 	byPath := map[string]*gen.ArchiveEntry{}
 	for _, e := range out.Entries {
 		byPath[e.Path] = e
@@ -129,8 +126,11 @@ func TestListEntries_MalformedInput(t *testing.T) {
 	}
 }
 
-func TestListEntries_EntryCountCap(t *testing.T) {
-	entries := make([]rawEntry, maxEntries+10)
+func TestListEntries_ManyEntriesReturnedWhole(t *testing.T) {
+	// This package no longer imposes its own entry-count ceiling — an
+	// archive with many entries should come back whole, not truncated.
+	const n = 100
+	entries := make([]rawEntry, n)
 	for i := range entries {
 		entries[i] = rawEntry{path: pad(i), typ: gen.EntryType_ENTRY_TYPE_FILE}
 	}
@@ -142,11 +142,8 @@ func TestListEntries_EntryCountCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !out.Truncated {
-		t.Fatalf("expected truncated=true for an archive over the entry-count cap")
-	}
-	if len(out.Entries) != maxEntries {
-		t.Fatalf("expected exactly %d entries on truncation, got %d", maxEntries, len(out.Entries))
+	if len(out.Entries) != n {
+		t.Fatalf("expected exactly %d entries, got %d", n, len(out.Entries))
 	}
 }
 

@@ -13,19 +13,16 @@ import (
 // path is excluded and reported in skipped_unsafe_paths rather than being
 // silently dropped or honored.
 func ExtractAll(ctx context.Context, ax axiom.Context, input *gen.ArchiveInput) (*gen.ExtractAllResult, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	oc, err := openContainer(input.GetData(), input.GetFormatHint())
 	if err != nil {
 		return nil, err
 	}
-	raws, skipped, truncated, err := walkData(oc, false)
+	raws, skipped, err := walkData(oc, false)
 	if err != nil {
 		return nil, err
 	}
 
-	out := &gen.ExtractAllResult{SkippedUnsafePaths: skipped, Truncated: truncated}
+	out := &gen.ExtractAllResult{SkippedUnsafePaths: skipped}
 	for _, re := range raws {
 		if re.typ != gen.EntryType_ENTRY_TYPE_FILE {
 			continue

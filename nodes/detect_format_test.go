@@ -59,11 +59,3 @@ func TestDetectFormat_Empty(t *testing.T) {
 		t.Fatalf("got recognized=true for empty input: %+v", out)
 	}
 }
-
-func TestDetectFormat_RawInputCap(t *testing.T) {
-	big := make([]byte, maxRawInputBytes+1)
-	_, err := DetectFormat(testCtxBG, testAx, &gen.ArchiveInput{Data: big})
-	if err == nil {
-		t.Fatal("expected an error for input exceeding the raw-input cap, got nil")
-	}
-}

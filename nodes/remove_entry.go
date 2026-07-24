@@ -13,21 +13,15 @@ import (
 // if no entry matches — a no-op copy is never silently returned for a
 // missing path.
 func RemoveEntry(ctx context.Context, ax axiom.Context, input *gen.RemoveEntryRequest) (*gen.ArchiveResult, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	target := input.GetPath()
 
 	oc, err := openContainer(input.GetData(), input.GetFormatHint())
 	if err != nil {
 		return nil, err
 	}
-	entries, _, truncated, err := walkData(oc, true)
+	entries, _, err := walkData(oc, true)
 	if err != nil {
 		return nil, err
-	}
-	if truncated {
-		return nil, fmt.Errorf("source archive exceeds this package's entry-count/size caps — refusing to modify a partially-read archive")
 	}
 
 	kept := entries[:0:0]

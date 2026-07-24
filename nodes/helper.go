@@ -4,30 +4,17 @@
 // zero-dependency, permissively-licensed pure-Go libraries:
 // github.com/klauspost/compress (zstd) and github.com/ulikunitz/xz (xz).
 //
-// This file holds logic shared by every node: raw-input size bounding,
-// format sniffing from magic bytes, path-traversal (zip-slip) sanitizing,
-// bounded decompression against zip/decompression bombs, and the common
-// "open an archive, walk its entries" machinery.
+// This file holds logic shared by every node: format sniffing from magic
+// bytes, path-traversal (zip-slip) sanitizing, decompression, and the
+// common "open an archive, walk its entries" machinery.
 //
 // SAFETY MODEL (see the package-level proto comment for the caller-facing
 // summary):
-//   - maxRawInputBytes bounds the raw bytes accepted by any node before any
-//     parsing/decompression is attempted at all.
-//   - maxEntries bounds how many archive entries a single call will walk.
-//   - maxTotalUncompressedBytes is a single shared "budget" threaded
-//     through every bounded read in one call — decremented as bytes are
-//     actually consumed (never trusted from a declared header field alone),
-//     covering both outer-stream decompression (tar.gz -> tar) and
-//     cumulative per-entry reads (zip, which compresses per-entry rather
-//     than as an outer stream).
-//   - "Bulk" nodes (ListEntries, GetArchiveSummary, ExtractAll,
-//     DecompressStream) return a best-effort partial result with
-//     `truncated=true` when a cap is hit — a partial list or a partial
-//     decompressed blob is still a safe, well-formed, useful result.
-//   - "Single-target / archive-construction" nodes (ReadEntry, CreateTar,
-//     CreateZip, AddEntry, RemoveEntry, ConvertContainer, CompressStream)
-//     return a structured error instead — a truncated single file or a
-//     truncated archive is not a safe or meaningful partial result.
+//   - Payload size, entry-count, and decompressed-output-size limits are
+//     NOT enforced here — the platform's ingress/transport already bounds
+//     request/response size, and the node sandbox bounds memory/CPU/time
+//     for a runaway decompression. This package owns domain correctness
+//     (is this a valid archive?) and path safety, not resource limits.
 //   - Every entry path is sanitized against zip-slip / traversal. Nothing
 //     is ever written to a real filesystem, so there is no "unsafe
 //     extraction" in the traditional sense — but an unsafe path is still
@@ -58,65 +45,8 @@ import (
 	gen "christiangeorgelucas/archive-tools/gen"
 )
 
-const (
-	// maxRawInputBytes bounds the raw archive/compressed bytes any node
-	// will even attempt to parse, before any decompression or central-
-	// directory parsing is attempted (a zip's central directory alone can
-	// be expensive to parse if the file is enormous).
-	//
-	// This is deliberately small (3 MiB), NOT a generous "bomb" ceiling:
-	// the Axiom node transport itself caps a single request/response
-	// message at 4 MiB (the standard grpc-go default), independent of
-	// anything this package declares. An earlier version of this package
-	// advertised 256 MiB/512 MiB caps that were never actually reachable —
-	// any real payload over ~4 MiB failed with an opaque transport-level
-	// 502 "ResourceExhausted" instead of this package's own structured
-	// error. 3 MiB leaves headroom under the 4 MiB ceiling for protobuf/
-	// JSON framing overhead and any other fields on the same message.
-	maxRawInputBytes = 3 * 1024 * 1024 // 3 MiB
-
-	// maxSymlinkTargetBytes bounds reading a zip symlink entry's tiny
-	// "content" (which IS the link target, per the zip symlink convention)
-	// — defensive even though real symlink targets are always short.
-	maxSymlinkTargetBytes = 4096
-
-	// defaultFileMode is used for a created entry that supplies mode=0.
-	defaultFileMode = 0o644
-)
-
-// maxTotalUncompressedBytes is the shared decompression/output budget for
-// a single node invocation — see the package doc comment above. Also kept
-// under the ~4 MiB node-transport message ceiling (see maxRawInputBytes's
-// comment) since this budget bounds bytes that flow back out in the
-// response message (ExtractAllResult, EntryData, CompressionResult) — a
-// node that decompressed a full 512 MiB internally would still fail
-// trying to RETURN that many bytes over the transport. A var (not a
-// const) purely so tests can shrink it temporarily to exercise the cap
-// cheaply instead of allocating real multi-megabyte fixtures.
-var maxTotalUncompressedBytes int64 = 3 * 1024 * 1024 // 3 MiB
-
-// maxEntries bounds how many archive entries a single call will walk.
-// Guards against an entry-count bomb (many near-empty entries). Lowered
-// from an earlier 100,000 to 5,000: with maxRawInputBytes now 3 MiB (see
-// above), a tar archive cannot physically contain 100,000 entries within
-// the raw-input cap anyway (each tar entry costs a minimum 512-byte
-// header), which made that cap dead code the raw-input cap always
-// preempted. 5,000 is comfortably reachable within 3 MiB for both tar
-// (~2.5 MiB of headers alone) and zip, so it is a real, independently
-// testable second line of defense rather than an unreachable formality —
-// and still far more entries than a normal archive this size would ever
-// contain. A var (not a const) so tests can shrink it further when only
-// the cap-triggering behavior, not a specific count, is being exercised.
-var maxEntries = 5000
-
-// checkRawInputSize is the first thing every node calls on caller-supplied
-// archive/compressed bytes.
-func checkRawInputSize(data []byte) error {
-	if len(data) > maxRawInputBytes {
-		return fmt.Errorf("input is %d bytes, exceeding the %d-byte raw-input cap", len(data), maxRawInputBytes)
-	}
-	return nil
-}
+// defaultFileMode is used for a created entry that supplies mode=0.
+const defaultFileMode = 0o644
 
 // ---------------------------------------------------------------------
 // Path safety (zip-slip / traversal)
@@ -286,50 +216,20 @@ type zstdCloser struct{ d *zstd.Decoder }
 func (z zstdCloser) Close() error { z.d.Close(); return nil }
 
 // ---------------------------------------------------------------------
-// Bounded reading (the decompression/zip-bomb guard)
+// Reading (decompressing/materializing full content — no size ceiling
+// here; the platform's ingress/transport and node sandbox already bound
+// request/response size and contain a runaway decompression)
 // ---------------------------------------------------------------------
 
-// readAllBounded reads r fully, consuming at most budget+1 bytes, and
-// errors if that limit is reached (meaning the true stream is larger than
-// the remaining budget). Returns the bytes read and the remaining budget
-// after the read.
-func readAllBounded(r io.Reader, budget int64) ([]byte, int64, error) {
-	limited := io.LimitReader(r, budget+1)
-	buf, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, budget, err
-	}
-	if int64(len(buf)) > budget {
-		return nil, budget, fmt.Errorf("exceeds the %d-byte total-uncompressed-size cap", maxTotalUncompressedBytes)
-	}
-	return buf, budget - int64(len(buf)), nil
-}
-
-// readBoundedTruncating is like readAllBounded but never errors on
-// exceeding the budget — it returns exactly `budget` bytes and
-// truncated=true instead, for the "bulk" nodes that report a partial
-// result rather than failing outright.
-func readBoundedTruncating(r io.Reader, budget int64) (buf []byte, remaining int64, truncated bool, err error) {
-	limited := io.LimitReader(r, budget+1)
-	buf, err = io.ReadAll(limited)
-	if err != nil {
-		return nil, budget, false, err
-	}
-	if int64(len(buf)) > budget {
-		return buf[:budget], 0, true, nil
-	}
-	return buf, budget - int64(len(buf)), false, nil
-}
-
-func decompressBounded(data []byte, codec string, budget int64) ([]byte, int64, error) {
+func decompressAll(data []byte, codec string) ([]byte, error) {
 	r, c, err := newDecompressReader(data, codec)
 	if err != nil {
-		return nil, budget, err
+		return nil, err
 	}
 	if c != nil {
 		defer c.Close()
 	}
-	return readAllBounded(r, budget)
+	return io.ReadAll(r)
 }
 
 // ---------------------------------------------------------------------
@@ -356,8 +256,8 @@ var validHints = map[string][2]string{
 
 // openContainer opens data as an archive, honoring an explicit format_hint
 // or auto-detecting from magic bytes. It fully materializes the container
-// bytes (decompressing any outer wrap, bounded by maxTotalUncompressedBytes)
-// so the tar/zip readers can operate on it directly.
+// bytes (decompressing any outer wrap) so the tar/zip readers can operate
+// on it directly.
 func openContainer(data []byte, formatHint string) (*openedContainer, error) {
 	if formatHint != "" {
 		pair, ok := validHints[formatHint]
@@ -374,7 +274,7 @@ func openContainer(data []byte, formatHint string) (*openedContainer, error) {
 		if compression == "none" {
 			return &openedContainer{kind: "tar", compression: "none", tarBytes: data}, nil
 		}
-		raw, _, err := decompressBounded(data, compression, maxTotalUncompressedBytes)
+		raw, err := decompressAll(data, compression)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing %s outer stream: %w", compression, err)
 		}
@@ -386,7 +286,7 @@ func openContainer(data []byte, formatHint string) (*openedContainer, error) {
 		return &openedContainer{kind: "zip", compression: "none", zipBytes: data}, nil
 	}
 	if comp := sniffCompression(data); comp != "" {
-		raw, _, err := decompressBounded(data, comp, maxTotalUncompressedBytes)
+		raw, err := decompressAll(data, comp)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing detected %s outer stream: %w", comp, err)
 		}
@@ -423,61 +323,45 @@ type rawEntry struct {
 
 // walkHeaders enumerates every entry's metadata without reading any entry
 // DATA (tar: header block only; zip: central-directory record only) — the
-// cheap path used by ListEntries and GetArchiveSummary. Bounded only by
-// maxEntries (no data is decompressed, so the size budget never applies).
-func walkHeaders(oc *openedContainer) (entries []rawEntry, truncated bool, err error) {
+// cheap path used by ListEntries and GetArchiveSummary.
+func walkHeaders(oc *openedContainer) (entries []rawEntry, err error) {
 	switch oc.kind {
 	case "tar":
 		tr := tar.NewReader(bytes.NewReader(oc.tarBytes))
 		for {
-			if len(entries) >= maxEntries {
-				return entries, true, nil
-			}
 			hdr, terr := tr.Next()
 			if terr == io.EOF {
-				return entries, false, nil
+				return entries, nil
 			}
 			if terr != nil {
-				return nil, false, fmt.Errorf("reading tar header: %w", terr)
+				return nil, fmt.Errorf("reading tar header: %w", terr)
 			}
 			entries = append(entries, rawEntryFromTarHeader(hdr))
 		}
 	case "zip":
 		zr, zerr := zip.NewReader(bytes.NewReader(oc.zipBytes), int64(len(oc.zipBytes)))
 		if zerr != nil {
-			return nil, false, fmt.Errorf("reading zip central directory: %w", zerr)
+			return nil, fmt.Errorf("reading zip central directory: %w", zerr)
 		}
 		for _, f := range zr.File {
-			if len(entries) >= maxEntries {
-				return entries, true, nil
-			}
 			entries = append(entries, rawEntryFromZipFile(f))
 		}
-		return entries, false, nil
+		return entries, nil
 	default:
-		return nil, false, fmt.Errorf("internal error: unknown container kind %q", oc.kind)
+		return nil, fmt.Errorf("internal error: unknown container kind %q", oc.kind)
 	}
 }
 
-// walkData enumerates every entry AND reads FILE entry data (bounded by
-// both maxEntries and the shared maxTotalUncompressedBytes budget). When
+// walkData enumerates every entry AND reads FILE entry data. When
 // strictPaths is true, an unsafe entry path aborts the whole call with an
 // error (used by AddEntry/RemoveEntry/ConvertContainer, which must not
 // silently drop or re-emit a source entry). When false, an unsafe entry is
 // skipped and its path recorded in skippedUnsafe instead (used by
 // ExtractAll).
-func walkData(oc *openedContainer, strictPaths bool) (entries []rawEntry, skippedUnsafe []string, truncated bool, err error) {
-	budget := int64(maxTotalUncompressedBytes)
-	count := 0
-
-	// process returns true when the caller should stop iterating (either
-	// because a cap was hit or because err was just set).
+func walkData(oc *openedContainer, strictPaths bool) (entries []rawEntry, skippedUnsafe []string, err error) {
+	// process returns true when the caller should stop iterating because
+	// err was just set.
 	process := func(re rawEntry, r io.Reader) bool {
-		count++
-		if count > maxEntries {
-			truncated = true
-			return true
-		}
 		if !re.pathSafe {
 			if strictPaths {
 				err = fmt.Errorf("archive contains an unsafe entry path %q (absolute or escapes via \"..\") — refusing to carry it forward", re.path)
@@ -487,10 +371,7 @@ func walkData(oc *openedContainer, strictPaths bool) (entries []rawEntry, skippe
 			return false
 		}
 		if re.typ == gen.EntryType_ENTRY_TYPE_FILE && r != nil {
-			var buf []byte
-			var trunc bool
-			var rerr error
-			buf, budget, trunc, rerr = readBoundedTruncating(r, budget)
+			buf, rerr := io.ReadAll(r)
 			if rerr != nil {
 				err = fmt.Errorf("reading entry %q: %w", re.path, rerr)
 				return true
@@ -498,10 +379,6 @@ func walkData(oc *openedContainer, strictPaths bool) (entries []rawEntry, skippe
 			re.data = buf
 			re.size = int64(len(buf))
 			entries = append(entries, re)
-			if trunc {
-				truncated = true
-				return true
-			}
 			return false
 		}
 		entries = append(entries, re)
@@ -539,7 +416,7 @@ func walkData(oc *openedContainer, strictPaths bool) (entries []rawEntry, skippe
 					err = fmt.Errorf("opening zip entry %q: %w", f.Name, operr)
 					return
 				}
-				target, _, _, _ := readBoundedTruncating(rc, maxSymlinkTargetBytes)
+				target, _ := io.ReadAll(rc)
 				rc.Close()
 				re.symlinkTarget = string(target)
 				if process(re, nil) {
@@ -568,14 +445,12 @@ func walkData(oc *openedContainer, strictPaths bool) (entries []rawEntry, skippe
 	return
 }
 
-// findEntry scans for exactly one named entry (used by ReadEntry), bounded
-// by maxEntries scanned and, once found, by the full decompression budget
-// for that single entry's data.
+// findEntry scans for exactly one named entry (used by ReadEntry) and
+// reads its full decompressed data.
 func findEntry(oc *openedContainer, target string) (*rawEntry, error) {
 	switch oc.kind {
 	case "tar":
 		tr := tar.NewReader(bytes.NewReader(oc.tarBytes))
-		scanned := 0
 		for {
 			hdr, err := tr.Next()
 			if err == io.EOF {
@@ -584,10 +459,6 @@ func findEntry(oc *openedContainer, target string) (*rawEntry, error) {
 			if err != nil {
 				return nil, fmt.Errorf("reading tar header: %w", err)
 			}
-			scanned++
-			if scanned > maxEntries {
-				return nil, fmt.Errorf("scanned %d entries without finding path %q, exceeding the entry-count cap of %d", scanned, target, maxEntries)
-			}
 			if hdr.Name != target {
 				continue
 			}
@@ -595,7 +466,7 @@ func findEntry(oc *openedContainer, target string) (*rawEntry, error) {
 			if re.typ != gen.EntryType_ENTRY_TYPE_FILE {
 				return nil, fmt.Errorf("path %q is not a regular file (type=%s) — nothing to read", target, re.typ.String())
 			}
-			buf, _, err := readAllBounded(tr, maxTotalUncompressedBytes)
+			buf, err := io.ReadAll(tr)
 			if err != nil {
 				return nil, fmt.Errorf("reading entry %q: %w", target, err)
 			}
@@ -607,9 +478,6 @@ func findEntry(oc *openedContainer, target string) (*rawEntry, error) {
 		zr, err := zip.NewReader(bytes.NewReader(oc.zipBytes), int64(len(oc.zipBytes)))
 		if err != nil {
 			return nil, fmt.Errorf("reading zip central directory: %w", err)
-		}
-		if len(zr.File) > maxEntries {
-			return nil, fmt.Errorf("archive has %d entries, exceeding the entry-count cap of %d", len(zr.File), maxEntries)
 		}
 		for _, f := range zr.File {
 			if f.Name != target {
@@ -624,7 +492,7 @@ func findEntry(oc *openedContainer, target string) (*rawEntry, error) {
 				return nil, fmt.Errorf("opening zip entry %q: %w", target, err)
 			}
 			defer rc.Close()
-			buf, _, err := readAllBounded(rc, maxTotalUncompressedBytes)
+			buf, err := io.ReadAll(rc)
 			if err != nil {
 				return nil, fmt.Errorf("reading entry %q: %w", target, err)
 			}

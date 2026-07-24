@@ -44,14 +44,3 @@ func TestCreateZip_UnsafePathRejected(t *testing.T) {
 		t.Fatal("expected an error for an absolute entry path, got nil")
 	}
 }
-
-func TestCreateZip_EntryCountCap(t *testing.T) {
-	entries := make([]*gen.CreateEntry, maxEntries+1)
-	for i := range entries {
-		entries[i] = &gen.CreateEntry{Path: pad(i)}
-	}
-	_, err := CreateZip(testCtxBG, testAx, &gen.CreateArchiveRequest{Entries: entries})
-	if err == nil {
-		t.Fatal("expected an error for a request exceeding the entry-count cap, got nil")
-	}
-}

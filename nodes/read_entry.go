@@ -14,9 +14,6 @@ import (
 // (absolute or containing "..") — an unsafe request is never partially
 // honored.
 func ReadEntry(ctx context.Context, ax axiom.Context, input *gen.ReadEntryRequest) (*gen.EntryData, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	target := input.GetPath()
 	if !sanitizePath(target) {
 		return nil, fmt.Errorf("path %q is unsafe (absolute or escapes via \"..\") — refusing to read it", target)

@@ -3,23 +3,15 @@ package nodes
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"christiangeorgelucas/archive-tools/axiom"
 	gen "christiangeorgelucas/archive-tools/gen"
 )
 
 // DecompressStream decompresses a standalone compressed stream: "gzip",
-// "zlib", "xz", "zstd", or "bzip2". Bounded by a total-output-bytes cap
-// (3 MiB) to guard against decompression bombs — a partial result is
-// returned with truncated=true if the cap is hit before the stream ends,
-// rather than erroring outright (a partial decompressed blob is still a
-// safe, useful, well-formed result — see helper.go's package doc comment
-// for why this differs from CompressStream/archive-construction nodes,
-// which error instead).
+// "zlib", "xz", "zstd", or "bzip2".
 func DecompressStream(ctx context.Context, ax axiom.Context, input *gen.DecompressRequest) (*gen.CompressionResult, error) {
-	if err := checkRawInputSize(input.GetData()); err != nil {
-		return nil, err
-	}
 	codec := input.GetCodec()
 	data := input.GetData()
 
@@ -31,7 +23,7 @@ func DecompressStream(ctx context.Context, ax axiom.Context, input *gen.Decompre
 		defer c.Close()
 	}
 
-	out, _, truncated, err := readBoundedTruncating(r, maxTotalUncompressedBytes)
+	out, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing %s stream: %w", codec, err)
 	}
@@ -41,6 +33,5 @@ func DecompressStream(ctx context.Context, ax axiom.Context, input *gen.Decompre
 		Codec:      codec,
 		InputSize:  int64(len(data)),
 		OutputSize: int64(len(out)),
-		Truncated:  truncated,
 	}, nil
 }
